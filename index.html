@@ -6,6 +6,7 @@
     <title>Sistem Pendukung Keputusan & Business Intelligence</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <style>
         body {
             font-family: 'Inter', sans-serif;
@@ -300,6 +301,12 @@
                 </p>
             </div>
 
+            <div class="card mb-8 bg-purple-50 border-purple-200">
+                <h4 class="text-xl font-semibold text-purple-800 mb-4">Diagram Bobot Performa Karyawan per Kriteria</h4>
+                <div class="relative h-96"> <canvas id="employeePerformanceChart"></canvas>
+                </div>
+                <p id="chart-warning" class="text-center text-sm text-slate-500 mt-4 hidden">Diagram ini hanya akan ditampilkan jika ada kriteria dan karyawan yang telah diinput.</p>
+            </div>
             <div class="card mb-8 bg-green-50 border-green-200">
                 <h4 class="text-xl font-semibold text-green-800 mb-4">Peringkat Karyawan Akhir</h4>
                 <div class="overflow-x-auto">
@@ -357,6 +364,7 @@
         let employeeCRs = {}; // Stores CRs for each criterion
         let currentCriteriaIdx = 0;
         let currentStep = 0; // To manage step indicator
+        let myChart; // To hold the Chart.js instance
 
         // Random Index (RI) values for Consistency Ratio calculation
         const RI_VALUES = {
@@ -474,6 +482,10 @@
             criteriaCR = 0;
             employeeCRs = {};
             currentCriteriaIdx = 0;
+            if (myChart) {
+                myChart.destroy(); // Destroy previous chart instance
+                myChart = null;
+            }
 
             // Clear previous inputs
             document.getElementById('num_criteria').value = '';
@@ -483,6 +495,7 @@
             document.getElementById('compare-criteria-error').classList.add('hidden');
             document.getElementById('define-employees-error').classList.add('hidden');
             document.getElementById('compare-employees-error').classList.add('hidden');
+            document.getElementById('chart-warning').classList.add('hidden'); // Hide chart warning
 
             showSection('setup-section', 0);
         }
@@ -588,7 +601,7 @@
             }
 
             if (numCriteria <= 1) { // If only 0 or 1 criteria, set default priority
-                criteriaPriorityVector = Array(numCriteria).fill(1 / numCriteria);
+                criteriaPriorityVector = Array(numCriteria).fill(numCriteria === 0 ? 0 : 1 / numCriteria); // Handle numCriteria = 0
                 criteriaCR = 0;
             } else {
                 const comparisons = [];
@@ -723,8 +736,6 @@
         function prevCriteria() {
             currentCriteriaIdx--;
             if (currentCriteriaIdx < 0) {
-                // This case should be handled by updating the back button's behavior in compareEmployees
-                // For safety, we can just go back to define employees if somehow this is called inappropriately
                 showSection('define-employees-section', 3);
                 return;
             }
@@ -736,9 +747,9 @@
             const currentCriteria = criteriaNames[currentCriteriaIdx];
 
             if (numEmployees <= 1) { // Already handled in compareEmployees, just ensure state is correct
-                 currentCriteriaIdx++;
-                 compareEmployees();
-                 return;
+                currentCriteriaIdx++;
+                compareEmployees();
+                return;
             }
 
             const employeeMatrix = createMatrix(numEmployees, numEmployees);
@@ -777,11 +788,25 @@
             compareEmployees(); // Move to the next criterion or results
         }
 
+        // Function to generate random colors for chart
+        function getRandomColor(alpha = 1) {
+            const r = Math.floor(Math.random() * 255);
+            const g = Math.floor(Math.random() * 255);
+            const b = Math.floor(Math.random() * 255);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
         function showResults() {
             const finalScores = Array(numEmployees).fill(0);
+            const chartWarning = document.getElementById('chart-warning');
 
-            if (numEmployees === 0) {
-                // No employees to rank, display empty results gracefully
+            // Clear previous chart if it exists
+            if (myChart) {
+                myChart.destroy();
+            }
+
+            if (numEmployees === 0 || numCriteria === 0) {
+                // No employees or criteria to rank, display empty results gracefully
                 document.getElementById('criteria-weights-table').querySelector('tbody').innerHTML = '<tr><td colspan="2" class="text-center text-slate-500">Tidak ada kriteria yang ditentukan.</td></tr>';
                 document.getElementById('criteria-cr-value').textContent = 'N/A';
                 document.getElementById('criteria-consistency-message').textContent = 'Tidak berlaku';
@@ -790,13 +815,16 @@
                 document.getElementById('ranked-employees-table').querySelector('tbody').innerHTML = '<tr><td colspan="3" class="text-center text-slate-500">Tidak ada karyawan yang dinilai.</td></tr>';
                 document.getElementById('employee-crs-table').querySelector('tbody').innerHTML = '<tr><td colspan="3" class="text-center text-slate-500">Tidak ada perbandingan karyawan.</td></tr>';
 
+                chartWarning.classList.remove('hidden'); // Show warning for chart
                 showSection('results-section', 5);
                 return;
             }
+            chartWarning.classList.add('hidden'); // Hide warning if data exists
 
+            // Calculate final scores
             criteriaNames.forEach((criteriaName, i) => {
                 if (employeePriorityVectors[criteriaName]) {
-                    const criteriaWeight = criteriaPriorityVector[i] || 0; // Handle case where criteriaWeight might be undefined
+                    const criteriaWeight = criteriaPriorityVector[i] || 0;
                     employeePriorityVectors[criteriaName].forEach((empWeight, j) => {
                         finalScores[j] += criteriaWeight * empWeight;
                     });
@@ -806,24 +834,110 @@
             // Rank employees
             const rankedEmployees = employeeNames.map((name, index) => ({
                 name: name,
-                score: finalScores[index]
+                score: finalScores[index],
+                originalIndex: index // Keep original index to retrieve criterion contributions later
             })).sort((a, b) => b.score - a.score); // Sort descending
+
+            // --- Chart Data Preparation ---
+            const chartLabels = rankedEmployees.map(emp => emp.name);
+            const chartDatasets = [];
+
+            criteriaNames.forEach((criteriaName, criteriaIdx) => {
+                const datasetData = [];
+                const criteriaWeight = criteriaPriorityVector[criteriaIdx] || 0;
+
+                rankedEmployees.forEach(rankedEmp => {
+                    // Get the employee's priority for this specific criterion
+                    const empWeightForCriterion = employeePriorityVectors[criteriaName][rankedEmp.originalIndex] || 0;
+                    // Calculate contribution
+                    datasetData.push(criteriaWeight * empWeightForCriterion);
+                });
+
+                chartDatasets.push({
+                    label: criteriaName,
+                    data: datasetData,
+                    backgroundColor: getRandomColor(0.8), // Semi-transparent for stacked view
+                    borderColor: getRandomColor(1),
+                    borderWidth: 1
+                });
+            });
+
+            const ctx = document.getElementById('employeePerformanceChart').getContext('2d');
+            myChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: chartLabels,
+                    datasets: chartDatasets
+                },
+                options: {
+                    indexAxis: 'y', // Horizontal bar chart
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Kontribusi Kriteria terhadap Skor Karyawan',
+                            font: {
+                                size: 16,
+                                weight: 'bold'
+                            },
+                            color: '#334155'
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        },
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: '#475569'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            stacked: true,
+                            title: {
+                                display: true,
+                                text: 'Skor Total (Normalized)',
+                                color: '#475569'
+                            },
+                            grid: {
+                                color: '#e2e8f0'
+                            },
+                            ticks: {
+                                color: '#475569'
+                            }
+                        },
+                        y: {
+                            stacked: true,
+                            title: {
+                                display: true,
+                                text: 'Karyawan',
+                                color: '#475569'
+                            },
+                            grid: {
+                                color: '#e2e8f0'
+                            },
+                            ticks: {
+                                color: '#475569'
+                            }
+                        }
+                    }
+                }
+            });
+
 
             // Populate Criteria Weights Table
             const criteriaWeightsTableBody = document.getElementById('criteria-weights-table').querySelector('tbody');
             criteriaWeightsTableBody.innerHTML = '';
-            if (numCriteria > 0) {
-                criteriaNames.forEach((name, i) => {
-                    const row = criteriaWeightsTableBody.insertRow();
-                    const cell1 = row.insertCell();
-                    const cell2 = row.insertCell();
-                    cell1.textContent = name;
-                    cell2.textContent = criteriaPriorityVector[i] ? criteriaPriorityVector[i].toFixed(4) : 'N/A';
-                });
-            } else {
-                criteriaWeightsTableBody.innerHTML = '<tr><td colspan="2" class="text-center text-slate-500">Tidak ada kriteria yang ditentukan.</td></tr>';
-            }
-
+            criteriaNames.forEach((name, i) => {
+                const row = criteriaWeightsTableBody.insertRow();
+                const cell1 = row.insertCell();
+                const cell2 = row.insertCell();
+                cell1.textContent = name;
+                cell2.textContent = criteriaPriorityVector[i] ? criteriaPriorityVector[i].toFixed(4) : 'N/A';
+            });
             document.getElementById('criteria-cr-value').textContent = criteriaCR.toFixed(4);
             document.getElementById('criteria-consistency-message').textContent = criteriaCR <= 0.10 ? "(Konsisten)" : "(Tidak Konsisten)";
             if (criteriaCR > 0.10) {
@@ -841,6 +955,9 @@
                 const cell2 = row.insertCell();
                 const cell3 = row.insertCell();
                 cell1.textContent = index + 1; // Rank
+                if (index === 0) { // Check if it's the first rank
+                    cell1.innerHTML = `${index + 1} 🏆`; // Add trophy emoji
+                }
                 cell2.textContent = emp.name;
                 cell3.textContent = emp.score.toFixed(4);
             });
